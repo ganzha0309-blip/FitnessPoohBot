@@ -10,7 +10,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 import firebase_admin
 from firebase_admin import credentials, firestore
-
+import os
+import tempfile
+import json
 from config import ADMINS
 
 load_dotenv()
@@ -18,7 +20,22 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Не найден BOT_TOKEN в файле .env")
 
-cred = credentials.Certificate("fitnesspooh-firebase-key.json")
+# Загрузка Firebase ключа
+firebase_key_json = os.getenv("FIREBASE_KEY")
+if firebase_key_json:
+    # Создаем временный файл из содержимого переменной
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        f.write(firebase_key_json)
+        firebase_key_path = f.name
+    print(f"Using temporary Firebase key file: {firebase_key_path}")
+else:
+    firebase_key_path = "fitnesspooh-firebase-key.json"
+    print("Using local Firebase key file")
+
+# Инициализация Firebase Admin SDK
+cred = credentials.Certificate(firebase_key_path)
+firebase_admin.initialize_app(cred)
+db = firestore.client()
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
