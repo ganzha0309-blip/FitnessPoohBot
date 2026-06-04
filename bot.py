@@ -36,8 +36,6 @@ else:
 cred = credentials.Certificate(firebase_key_path)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
-firebase_admin.initialize_app(cred)
-db = firestore.client()
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
