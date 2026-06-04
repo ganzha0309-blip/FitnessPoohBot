@@ -10,7 +10,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 import firebase_admin
 from firebase_admin import credentials, firestore
-import os
 import tempfile
 import json
 from config import ADMINS
