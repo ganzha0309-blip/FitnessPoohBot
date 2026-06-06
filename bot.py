@@ -145,7 +145,13 @@ def get_habit_items(data: dict) -> list[dict]:
     items = []
     for habit in DEFAULT_HABITS:
         custom = settings.get(habit["code"], {})
-        items.append({**habit, "title": custom.get("title") or habit["title"]})
+        items.append(
+            {
+                **habit,
+                "title": custom.get("title") or habit["title"],
+                "icon": custom.get("icon") or habit["icon"],
+            }
+        )
 
     subscription, _, _ = get_subscription(data)
     limit = CUSTOM_HABIT_LIMITS.get(subscription, 0)
@@ -293,12 +299,11 @@ async def show_habits(callback: types.CallbackQuery):
         buttons.append(
             [
                 InlineKeyboardButton(
-                    text=f"{habit['icon']} {habit['title']} ({habit['caption']})",
+                    text=f"{habit['icon']} {habit['title']}",
                     callback_data=f"habit:{habit['code']}",
                 )
             ]
         )
-    buttons.append([InlineKeyboardButton(text="⚙️ Настроить привычки", callback_data="habit_settings")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back")])
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=buttons
@@ -371,74 +376,26 @@ async def mark_habit(callback: types.CallbackQuery):
 async def show_habit_settings(callback: types.CallbackQuery, state: FSMContext | None = None):
     if state:
         await state.clear()
-
-    user_id = str(callback.from_user.id)
-    doc = db.collection("users").document(user_id).get()
-    if not doc.exists:
-        await callback.answer("Сначала напиши /start", show_alert=True)
-        return
-
-    data = doc.to_dict()
-    habit_items = get_habit_items(data)
-    custom_habits = data.get("custom_habits") or []
-    limit = custom_habit_limit(data)
-    buttons = []
-    for habit in habit_items:
-        buttons.append(
-            [InlineKeyboardButton(text=f"✏️ {habit['icon']} {habit['title']}", callback_data=f"edit_habit:{habit['code']}")]
-        )
-        if not habit.get("is_default"):
-            buttons.append(
-                [InlineKeyboardButton(text=f"🗑 Удалить {habit['title']}", callback_data=f"delete_habit:{habit['code']}")]
-            )
-
-    if len(custom_habits) < limit:
-        buttons.append([InlineKeyboardButton(text="➕ Добавить привычку", callback_data="add_habit")])
-    else:
-        buttons.append([InlineKeyboardButton(text="🔒 Лимит привычек", callback_data="habit_limit_info")])
-
-    buttons.append([InlineKeyboardButton(text="🔙 К привычкам", callback_data="habits")])
-    subscription, _, _ = get_subscription(data)
-    text = (
-        "⚙️ Настройка привычек\n\n"
-        f"Подписка: {SUBSCRIPTION_LABELS.get(subscription, 'Free')}\n"
-        f"Дополнительные привычки: {len(custom_habits)}/{limit}\n\n"
-        "Базовые привычки можно переименовывать на любой подписке. "
-        "Добавление доступно: Base +1, PRO +2, VIP +3."
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🔙 К привычкам", callback_data="habits")]]
     )
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.message.edit_text(
+        "⚙️ Настройка привычек теперь в Mini App.\n\n"
+        "В боте оставили быструю отметку и просмотр, а названия, смайлики и новые привычки меняются в приложении.",
+        reply_markup=keyboard,
+    )
     await callback.answer()
 
 
 @dp.callback_query(lambda c: c.data == "habit_limit_info")
 async def habit_limit_info(callback: types.CallbackQuery):
-    await callback.answer("Лимит зависит от подписки: Free 0, Base 1, PRO 2, VIP 3.", show_alert=True)
+    await callback.answer("Настройка привычек теперь в Mini App.", show_alert=True)
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("edit_habit:"))
 async def start_edit_habit(callback: types.CallbackQuery, state: FSMContext):
-    code = callback.data.split(":")[1]
-    user_id = str(callback.from_user.id)
-    doc = db.collection("users").document(user_id).get()
-    if not doc.exists:
-        await callback.answer("Сначала напиши /start", show_alert=True)
-        return
-
-    data = doc.to_dict()
-    if code not in {habit["code"] for habit in get_habit_items(data)}:
-        await callback.answer("Привычка не найдена.", show_alert=True)
-        return
-
-    await state.update_data(habit_code=code)
-    await state.set_state(HabitEditStates.waiting_for_title)
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="habit_settings")]]
-    )
-    await callback.message.edit_text(
-        f"Напиши новое название для привычки:\n{find_habit_title(data, code)}",
-        reply_markup=keyboard,
-    )
-    await callback.answer()
+    await state.clear()
+    await callback.answer("Редактирование привычек теперь в Mini App.", show_alert=True)
 
 
 @dp.message(HabitEditStates.waiting_for_title)
@@ -479,23 +436,8 @@ async def save_habit_title(message: types.Message, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data == "add_habit")
 async def start_add_habit(callback: types.CallbackQuery, state: FSMContext):
-    user_id = str(callback.from_user.id)
-    doc = db.collection("users").document(user_id).get()
-    if not doc.exists:
-        await callback.answer("Сначала напиши /start", show_alert=True)
-        return
-
-    data = doc.to_dict()
-    if len(data.get("custom_habits") or []) >= custom_habit_limit(data):
-        await callback.answer("Лимит привычек для подписки достигнут.", show_alert=True)
-        return
-
-    await state.set_state(HabitAddStates.waiting_for_title)
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="habit_settings")]]
-    )
-    await callback.message.edit_text("Напиши название новой привычки:", reply_markup=keyboard)
-    await callback.answer()
+    await state.clear()
+    await callback.answer("Добавление привычек теперь в Mini App.", show_alert=True)
 
 
 @dp.message(HabitAddStates.waiting_for_title)
@@ -537,23 +479,7 @@ async def save_new_habit(message: types.Message, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("delete_habit:"))
 async def delete_custom_habit(callback: types.CallbackQuery):
-    code = callback.data.split(":")[1]
-    user_id = str(callback.from_user.id)
-    user_ref = db.collection("users").document(user_id)
-    doc = user_ref.get()
-    if not doc.exists:
-        await callback.answer("Сначала напиши /start", show_alert=True)
-        return
-
-    data = doc.to_dict()
-    if code in {habit["code"] for habit in DEFAULT_HABITS}:
-        await callback.answer("Базовую привычку можно только переименовать.", show_alert=True)
-        return
-
-    custom_habits = [habit for habit in (data.get("custom_habits") or []) if habit.get("code") != code]
-    user_ref.update({"custom_habits": custom_habits})
-    await callback.answer("Привычка удалена.", show_alert=False)
-    await show_habit_settings(callback)
+    await callback.answer("Удаление привычек теперь в Mini App.", show_alert=True)
 
 
 @dp.callback_query(lambda c: c.data == "workouts")
