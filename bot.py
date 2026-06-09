@@ -960,9 +960,9 @@ async def admin_challenges(callback: types.CallbackQuery, state: FSMContext):
     ]
     keyboard_buttons.extend(
         [
-            [InlineKeyboardButton(text="? ??????? ????????", callback_data="challenge_create")],
-            [InlineKeyboardButton(text="?? ????????", callback_data="admin_challenges")],
-            [InlineKeyboardButton(text="?? ? ?????-??????", callback_data="admin_panel")],
+            [InlineKeyboardButton(text="Создать челлендж", callback_data="challenge_create")],
+            [InlineKeyboardButton(text="Обновить", callback_data="admin_challenges")],
+            [InlineKeyboardButton(text="В админ-панель", callback_data="admin_panel")],
         ]
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
