@@ -65,6 +65,9 @@ LEVELS = {
 }
 
 
+HABIT_REMINDER_HOUR = int(os.getenv("HABIT_REMINDER_HOUR", "20"))
+
+
 class BroadcastStates(StatesGroup):
     waiting_for_message = State()
 
@@ -77,6 +80,10 @@ class TrainerNoteStates(StatesGroup):
     waiting_for_note = State()
 
 
+class SupportStates(StatesGroup):
+    waiting_for_text = State()
+
+
 class HabitEditStates(StatesGroup):
     waiting_for_title = State()
 
@@ -87,6 +94,44 @@ class HabitAddStates(StatesGroup):
 
 def today_iso() -> str:
     return datetime.now(MSK).date().isoformat()
+
+
+def now_iso() -> str:
+    return datetime.now(MSK).isoformat(timespec="seconds")
+
+
+def support_ticket_keyboard(ticket_id: str, user_id: str, status: str = "open") -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton(text="🔗 Профиль", url=f"tg://user?id={user_id}"),
+            InlineKeyboardButton(text="✏️ Написать", callback_data=f"msg_client:{user_id}"),
+        ],
+    ]
+    if status == "open":
+        buttons.append([InlineKeyboardButton(text="✅ Закрыть обращение", callback_data=f"support_close:{ticket_id}")])
+    buttons.append([InlineKeyboardButton(text="📨 Все обращения", callback_data="admin_support:1")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def support_notice_keyboard(ticket_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📨 Открыть обращения", callback_data="admin_support:1")],
+            [InlineKeyboardButton(text="Ок, принял", callback_data=f"support_ack:{ticket_id}")],
+        ]
+    )
+
+
+def format_support_ticket(ticket_id: str, ticket: dict) -> str:
+    return (
+        f"🆘 Обращение #{ticket_id}\n\n"
+        f"👤 Клиент: {ticket.get('name', 'без имени')}\n"
+        f"🆔 ID: {ticket.get('user_id')}\n"
+        f"💎 Подписка: {ticket.get('subscription', 'Free')}\n"
+        f"📅 Создано: {ticket.get('created_at', '-')}\n"
+        f"📌 Статус: {ticket.get('status', 'open')}\n\n"
+        f"Сообщение:\n{ticket.get('text', '-')}"
+    )
 
 
 def get_level(xp: int) -> str:
@@ -187,6 +232,17 @@ def find_habit_title(data: dict, code: str) -> str:
     return code
 
 
+def needs_habit_reminder(data: dict) -> bool:
+    today = today_iso()
+    if data.get("habit_reminder_sent") == today:
+        return False
+    if data.get("last_action_date") != today:
+        return True
+
+    habits = data.get("habits") or {}
+    return any(not habits.get(habit["code"]) for habit in get_habit_items(data))
+
+
 async def ensure_user(message: types.Message) -> bool:
     user_id = str(message.from_user.id)
     user_ref = db.collection("users").document(user_id)
@@ -217,6 +273,7 @@ async def show_main_menu(target: types.CallbackQuery | types.Message, edit: bool
         [InlineKeyboardButton(text="✅ Отметить привычки", callback_data="habits")],
         [InlineKeyboardButton(text="📊 Мой профиль", callback_data="profile")],
         [InlineKeyboardButton(text="🏆 Тренировки", callback_data="workouts")],
+        [InlineKeyboardButton(text="🆘 Помощь", callback_data="support")],
     ]
     if user_id in ADMINS:
         keyboard_buttons.append([InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="admin_panel")])
@@ -240,6 +297,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="👥 Список клиентов", callback_data="admin_clients:1")],
+            [InlineKeyboardButton(text="🆘 Обращения", callback_data="admin_support:1")],
             [InlineKeyboardButton(text="📈 Статистика", callback_data="admin_stats")],
             [InlineKeyboardButton(text="⏳ Подписки заканчиваются", callback_data="admin_expiring_subs")],
             [InlineKeyboardButton(text="📢 Сделать рассылку", callback_data="admin_broadcast")],
@@ -509,6 +567,104 @@ async def show_workouts(callback: types.CallbackQuery):
     await callback.answer()
 
 
+@dp.callback_query(lambda c: c.data == "support")
+async def start_support_ticket(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(SupportStates.waiting_for_text)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="support_cancel")]]
+    )
+    await callback.message.edit_text(
+        "🆘 Помощь\n\n"
+        "Опиши проблему одним сообщением: что случилось, где именно, и что ты нажимал перед ошибкой.\n\n"
+        "Если есть скриншот, пока отправь текстом, а скрин можно будет прислать тренеру после ответа.",
+        reply_markup=keyboard,
+    )
+    await callback.answer()
+
+
+@dp.message(Command("support"))
+async def support_command(message: types.Message, state: FSMContext):
+    await ensure_user(message)
+    await state.clear()
+    await state.set_state(SupportStates.waiting_for_text)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="support_cancel")]]
+    )
+    await message.answer(
+        "🆘 Опиши проблему одним сообщением. Я передам обращение тренеру.",
+        reply_markup=keyboard,
+    )
+
+
+@dp.callback_query(StateFilter(SupportStates.waiting_for_text), lambda c: c.data == "support_cancel")
+async def cancel_support_ticket(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("Обращение отменено.")
+    await show_main_menu(callback, edit=True)
+
+
+@dp.message(SupportStates.waiting_for_text)
+async def save_support_ticket(message: types.Message, state: FSMContext):
+    text = (message.text or message.caption or "").strip()
+    if len(text) < 5:
+        await message.answer("Напиши чуть подробнее, чтобы тренер понял проблему.")
+        return
+
+    user_id = str(message.from_user.id)
+    await ensure_user(message)
+    user_ref = db.collection("users").document(user_id)
+    user_doc = user_ref.get()
+    user_data = user_doc.to_dict() if user_doc.exists else {}
+    subscription = format_subscription(user_data)
+    ticket_ref = db.collection("support_tickets").document()
+    ticket = {
+        "id": ticket_ref.id,
+        "user_id": user_id,
+        "name": user_data.get("name") or message.from_user.first_name or "Без имени",
+        "username": user_data.get("username") or message.from_user.username or "",
+        "subscription": subscription,
+        "text": text[:1500],
+        "status": "open",
+        "created_at": now_iso(),
+        "closed_at": None,
+        "closed_by": None,
+    }
+    ticket_ref.set(ticket)
+
+    admin_text = (
+        "🆘 Новое обращение клиента\n\n"
+        f"👤 {ticket['name']}\n"
+        f"🆔 {user_id}\n"
+        f"💎 {subscription}\n\n"
+        "Зайди в раздел обращений, чтобы посмотреть детали."
+    )
+    for admin_id in ADMINS:
+        try:
+            await bot.send_message(
+                admin_id,
+                admin_text,
+                reply_markup=support_notice_keyboard(ticket_ref.id),
+            )
+            await asyncio.sleep(0.05)
+        except Exception as exc:
+            logging.warning("Failed to notify admin %s about support ticket %s: %s", admin_id, ticket_ref.id, exc)
+
+    await state.clear()
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Отметить привычки", callback_data="habits")],
+            [InlineKeyboardButton(text="📊 Мой профиль", callback_data="profile")],
+            [InlineKeyboardButton(text="🍯 Главное меню", callback_data="back")],
+        ]
+    )
+    await message.answer(
+        "✅ Обращение отправлено тренеру.\n"
+        "Когда тренер посмотрит проблему, он сможет написать тебе прямо в Telegram.",
+        reply_markup=keyboard,
+    )
+
+
 @dp.callback_query(lambda c: c.data == "back")
 async def back_to_menu(callback: types.CallbackQuery):
     await show_main_menu(callback, edit=True)
@@ -628,6 +784,132 @@ async def admin_stats(callback: types.CallbackQuery):
         await callback.answer("Данные уже актуальны.", show_alert=False)
         return
     await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("admin_support:"))
+async def admin_support_list(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMINS:
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    page = int(parts[1]) if len(parts) > 1 else 1
+    limit = 5
+    tickets = []
+    for doc in db.collection("support_tickets").stream():
+        ticket = doc.to_dict() or {}
+        ticket["id"] = doc.id
+        tickets.append(ticket)
+
+    tickets.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    tickets.sort(key=lambda item: 0 if item.get("status", "open") == "open" else 1)
+    open_count = sum(1 for ticket in tickets if ticket.get("status", "open") == "open")
+    total = len(tickets)
+    total_pages = (total + limit - 1) // limit if total else 1
+    page = max(1, min(page, total_pages))
+    offset = (page - 1) * limit
+    page_tickets = tickets[offset : offset + limit]
+
+    keyboard_buttons = []
+    for ticket in page_tickets:
+        status_icon = "🟢" if ticket.get("status", "open") == "open" else "⚪"
+        title = f"{status_icon} {ticket.get('name', 'Без имени')} · {ticket.get('created_at', '-')[:16]}"
+        keyboard_buttons.append(
+            [InlineKeyboardButton(text=title[:64], callback_data=f"support_ticket:{ticket['id']}")]
+        )
+
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(InlineKeyboardButton(text="◀ Назад", callback_data=f"admin_support:{page - 1}"))
+    if page < total_pages:
+        nav_buttons.append(InlineKeyboardButton(text="Вперед ▶", callback_data=f"admin_support:{page + 1}"))
+    if nav_buttons:
+        keyboard_buttons.append(nav_buttons)
+    keyboard_buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"admin_support:{page}")])
+    keyboard_buttons.append([InlineKeyboardButton(text="🔙 В админ-панель", callback_data="admin_panel")])
+
+    text = (
+        "🆘 Обращения клиентов\n\n"
+        f"Открытых: {open_count}\n"
+        f"Всего: {total}\n"
+        f"Страница: {page}/{total_pages}\n\n"
+        "Открытые обращения показываются первыми."
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_buttons))
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc):
+            raise
+        await callback.answer("Данные уже актуальны.", show_alert=False)
+        return
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("support_ticket:"))
+async def admin_support_ticket(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMINS:
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+
+    _, ticket_id = callback.data.split(":", 1)
+    doc = db.collection("support_tickets").document(ticket_id).get()
+    if not doc.exists:
+        await callback.answer("Обращение не найдено.", show_alert=True)
+        return
+
+    ticket = doc.to_dict() or {}
+    user_id = str(ticket.get("user_id", ""))
+    await callback.message.edit_text(
+        format_support_ticket(ticket_id, ticket),
+        reply_markup=support_ticket_keyboard(ticket_id, user_id, ticket.get("status", "open")),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("support_ack:"))
+async def admin_support_ack(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMINS:
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+    try:
+        await callback.answer("Принято.", show_alert=False)
+        await callback.message.delete()
+    except TelegramBadRequest:
+        await callback.answer("Принято.", show_alert=False)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("support_close:"))
+async def admin_support_close(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMINS:
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+
+    _, ticket_id = callback.data.split(":", 1)
+    ticket_ref = db.collection("support_tickets").document(ticket_id)
+    doc = ticket_ref.get()
+    if not doc.exists:
+        await callback.answer("Обращение не найдено.", show_alert=True)
+        return
+
+    current_ticket = doc.to_dict() or {}
+    if current_ticket.get("status") == "closed":
+        await callback.answer("Обращение уже закрыто.", show_alert=False)
+        return
+
+    ticket_ref.update(
+        {
+            "status": "closed",
+            "closed_at": now_iso(),
+            "closed_by": str(callback.from_user.id),
+        }
+    )
+    ticket = ticket_ref.get().to_dict() or {}
+    user_id = str(ticket.get("user_id", ""))
+    await callback.message.edit_text(
+        format_support_ticket(ticket_id, ticket),
+        reply_markup=support_ticket_keyboard(ticket_id, user_id, ticket.get("status", "open")),
+    )
+    await callback.answer("Обращение закрыто.", show_alert=False)
 
 
 @dp.callback_query(lambda c: c.data == "admin_expiring_subs")
@@ -1100,8 +1382,46 @@ async def admin_send_broadcast(message: types.Message, state: FSMContext):
     await message.answer("⚙️ Админ-панель", reply_markup=admin_panel_keyboard())
 
 
+async def send_habit_reminders():
+    today = today_iso()
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Отметить привычки", callback_data="habits")],
+            [InlineKeyboardButton(text="📊 Мой профиль", callback_data="profile")],
+        ]
+    )
+    for doc in db.collection("users").stream():
+        data = doc.to_dict() or {}
+        if not needs_habit_reminder(data):
+            continue
+        try:
+            await bot.send_message(
+                int(doc.id),
+                "🍯 Пух напоминает: не забудь отметиться сегодня.\n\n"
+                "Даже маленькая отметка держит режим и streak.",
+                reply_markup=keyboard,
+            )
+            db.collection("users").document(doc.id).update({"habit_reminder_sent": today})
+            await asyncio.sleep(0.05)
+        except Exception as exc:
+            logging.warning("Failed to send habit reminder to %s: %s", doc.id, exc)
+
+
+async def habit_reminder_worker():
+    logging.info("Habit reminder worker enabled: %s:00 MSK", HABIT_REMINDER_HOUR)
+    while True:
+        now = datetime.now(MSK)
+        if now.hour >= HABIT_REMINDER_HOUR:
+            try:
+                await send_habit_reminders()
+            except Exception as exc:
+                logging.exception("Habit reminder worker failed: %s", exc)
+        await asyncio.sleep(600)
+
+
 async def main():
     print("Бот FitnessPooh запущен...")
+    asyncio.create_task(habit_reminder_worker())
     await dp.start_polling(bot)
 
 
