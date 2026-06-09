@@ -931,6 +931,8 @@ async def admin_challenges(callback: types.CallbackQuery, state: FSMContext):
     challenges = []
     for doc in db.collection("challenges").stream():
         challenge = doc.to_dict() or {}
+        if challenge.get("status", "active") == "hidden":
+            continue
         challenge["id"] = doc.id
         challenges.append(challenge)
     challenges.sort(key=lambda item: item.get("created_at", ""), reverse=True)
@@ -947,13 +949,24 @@ async def admin_challenges(callback: types.CallbackQuery, state: FSMContext):
     else:
         lines.append("Пока челленджей нет.")
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Создать челлендж", callback_data="challenge_create")],
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_challenges")],
-            [InlineKeyboardButton(text="🔙 В админ-панель", callback_data="admin_panel")],
+    keyboard_buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"Удалить: {challenge.get('title', 'Без названия')[:32]}",
+                callback_data=f"challenge_delete:{challenge['id']}",
+            )
+        ]
+        for challenge in challenges[:10]
+    ]
+    keyboard_buttons.extend(
+        [
+            [InlineKeyboardButton(text="? ??????? ????????", callback_data="challenge_create")],
+            [InlineKeyboardButton(text="?? ????????", callback_data="admin_challenges")],
+            [InlineKeyboardButton(text="?? ? ?????-??????", callback_data="admin_panel")],
         ]
     )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+
     try:
         await callback.message.edit_text("\n".join(lines), reply_markup=keyboard)
     except TelegramBadRequest as exc:
@@ -975,6 +988,56 @@ async def challenge_create_start(callback: types.CallbackQuery, state: FSMContex
         inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="challenge_cancel")]]
     )
     await callback.message.edit_text("🏁 Название челленджа:", reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("challenge_delete:"))
+async def challenge_delete_confirm(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMINS:
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+    _, challenge_id = callback.data.split(":", 1)
+    doc = db.collection("challenges").document(challenge_id).get()
+    if not doc.exists:
+        await callback.answer("Челлендж не найден.", show_alert=True)
+        return
+    challenge = doc.to_dict() or {}
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Да, удалить", callback_data=f"challenge_delete_yes:{challenge_id}"),
+                InlineKeyboardButton(text="Отмена", callback_data="admin_challenges"),
+            ]
+        ]
+    )
+    await callback.message.edit_text(
+        f"Удалить челлендж?\n\n{challenge.get('title', 'Без названия')}",
+        reply_markup=keyboard,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("challenge_delete_yes:"))
+async def challenge_delete_yes(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMINS:
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+    _, challenge_id = callback.data.split(":", 1)
+    challenge_ref = db.collection("challenges").document(challenge_id)
+    if not challenge_ref.get().exists:
+        await callback.answer("Челлендж не найден.", show_alert=True)
+        return
+    challenge_ref.update(
+        {
+            "status": "hidden",
+            "hidden_at": now_iso(),
+            "hidden_by": str(callback.from_user.id),
+        }
+    )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🏁 К челленджам", callback_data="admin_challenges")]]
+    )
+    await callback.message.edit_text("Челлендж удален из активного списка.", reply_markup=keyboard)
     await callback.answer()
 
 
