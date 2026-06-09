@@ -84,6 +84,14 @@ class SupportStates(StatesGroup):
     waiting_for_text = State()
 
 
+class ChallengeCreateStates(StatesGroup):
+    waiting_for_title = State()
+    waiting_for_description = State()
+    waiting_for_duration = State()
+    waiting_for_reward = State()
+    waiting_for_subscription = State()
+
+
 class HabitEditStates(StatesGroup):
     waiting_for_title = State()
 
@@ -298,6 +306,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="👥 Список клиентов", callback_data="admin_clients:1")],
             [InlineKeyboardButton(text="🆘 Обращения", callback_data="admin_support:1")],
+            [InlineKeyboardButton(text="🏁 Челленджи", callback_data="admin_challenges")],
             [InlineKeyboardButton(text="📈 Статистика", callback_data="admin_stats")],
             [InlineKeyboardButton(text="⏳ Подписки заканчиваются", callback_data="admin_expiring_subs")],
             [InlineKeyboardButton(text="📢 Сделать рассылку", callback_data="admin_broadcast")],
@@ -910,6 +919,175 @@ async def admin_support_close(callback: types.CallbackQuery):
         reply_markup=support_ticket_keyboard(ticket_id, user_id, ticket.get("status", "open")),
     )
     await callback.answer("Обращение закрыто.", show_alert=False)
+
+
+@dp.callback_query(lambda c: c.data == "admin_challenges")
+async def admin_challenges(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMINS:
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+    await state.clear()
+
+    challenges = []
+    for doc in db.collection("challenges").stream():
+        challenge = doc.to_dict() or {}
+        challenge["id"] = doc.id
+        challenges.append(challenge)
+    challenges.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+
+    lines = ["🏁 Челленджи\n"]
+    if challenges:
+        for index, challenge in enumerate(challenges[:10], start=1):
+            lines.append(
+                f"{index}. {challenge.get('title', 'Без названия')} · "
+                f"{SUBSCRIPTION_LABELS.get(challenge.get('required_subscription', 'free'), 'Free')} · "
+                f"{challenge.get('duration_days', 7)} дн. · "
+                f"{challenge.get('participants_count', 0)} уч."
+            )
+    else:
+        lines.append("Пока челленджей нет.")
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Создать челлендж", callback_data="challenge_create")],
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_challenges")],
+            [InlineKeyboardButton(text="🔙 В админ-панель", callback_data="admin_panel")],
+        ]
+    )
+    try:
+        await callback.message.edit_text("\n".join(lines), reply_markup=keyboard)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc):
+            raise
+        await callback.answer("Данные уже актуальны.", show_alert=False)
+        return
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "challenge_create")
+async def challenge_create_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMINS:
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(ChallengeCreateStates.waiting_for_title)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="challenge_cancel")]]
+    )
+    await callback.message.edit_text("🏁 Название челленджа:", reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(StateFilter(ChallengeCreateStates), lambda c: c.data == "challenge_cancel")
+async def challenge_create_cancel(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await admin_challenges(callback, state)
+
+
+@dp.message(ChallengeCreateStates.waiting_for_title)
+async def challenge_create_title(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMINS:
+        return
+    title = (message.text or "").strip()[:60]
+    if len(title) < 3:
+        await message.answer("Название должно быть минимум 3 символа.")
+        return
+    await state.update_data(title=title)
+    await state.set_state(ChallengeCreateStates.waiting_for_description)
+    await message.answer("Короткое описание челленджа:")
+
+
+@dp.message(ChallengeCreateStates.waiting_for_description)
+async def challenge_create_description(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMINS:
+        return
+    description = (message.text or "").strip()[:500]
+    if len(description) < 5:
+        await message.answer("Описание должно быть чуть подробнее.")
+        return
+    await state.update_data(description=description)
+    await state.set_state(ChallengeCreateStates.waiting_for_duration)
+    await message.answer("Длительность в днях: например 3, 7, 14 или 30.")
+
+
+@dp.message(ChallengeCreateStates.waiting_for_duration)
+async def challenge_create_duration(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMINS:
+        return
+    try:
+        duration = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("Напиши число дней.")
+        return
+    if duration < 1 or duration > 60:
+        await message.answer("Длительность должна быть от 1 до 60 дней.")
+        return
+    await state.update_data(duration_days=duration)
+    await state.set_state(ChallengeCreateStates.waiting_for_reward)
+    await message.answer("Награда XP за выполнение: например 50 или 100.")
+
+
+@dp.message(ChallengeCreateStates.waiting_for_reward)
+async def challenge_create_reward(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMINS:
+        return
+    try:
+        reward = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("Напиши число XP.")
+        return
+    if reward < 0 or reward > 5000:
+        await message.answer("Награда должна быть от 0 до 5000 XP.")
+        return
+    await state.update_data(reward_xp=reward)
+    await state.set_state(ChallengeCreateStates.waiting_for_subscription)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Free", callback_data="challenge_sub:free"),
+                InlineKeyboardButton(text="Base", callback_data="challenge_sub:base"),
+            ],
+            [
+                InlineKeyboardButton(text="PRO", callback_data="challenge_sub:pro"),
+                InlineKeyboardButton(text="VIP", callback_data="challenge_sub:vip"),
+            ],
+        ]
+    )
+    await message.answer("Для какой подписки доступен челлендж?", reply_markup=keyboard)
+
+
+@dp.callback_query(StateFilter(ChallengeCreateStates.waiting_for_subscription), lambda c: c.data and c.data.startswith("challenge_sub:"))
+async def challenge_create_subscription(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMINS:
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+    _, subscription = callback.data.split(":")
+    if subscription not in SUBSCRIPTION_LABELS:
+        await callback.answer("Неизвестная подписка.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    challenge_ref = db.collection("challenges").document()
+    challenge_ref.set(
+        {
+            "title": data["title"],
+            "description": data["description"],
+            "duration_days": data["duration_days"],
+            "reward_xp": data["reward_xp"],
+            "required_subscription": subscription,
+            "check_type": "manual",
+            "status": "active",
+            "participants_count": 0,
+            "created_at": now_iso(),
+            "created_by": str(callback.from_user.id),
+        }
+    )
+    await state.clear()
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🏁 К челленджам", callback_data="admin_challenges")]]
+    )
+    await callback.message.edit_text("✅ Челлендж создан.", reply_markup=keyboard)
+    await callback.answer()
 
 
 @dp.callback_query(lambda c: c.data == "admin_expiring_subs")
